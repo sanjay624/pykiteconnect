@@ -352,11 +352,13 @@ class KiteConnect(object):
                     iceberg_legs=None,
                     iceberg_quantity=None,
                     auction_number=None,
+                    algo_id=None,
                     tag=None,
                     market_protection=None):
         """Place an order.
 
         - `market_protection` accepts `-1` for automatic market protection applied by the system as per market protection guidelines, or a value greater than `0` up to `100` representing a percentage.
+        - `algo_id` is an optional algo ID to associate with the order.
         """
         params = locals()
         del (params["self"])
@@ -385,6 +387,7 @@ class KiteConnect(object):
                               iceberg_legs=None,
                               iceberg_quantity=None,
                               auction_number=None,
+                              algo_id=None,
                               tag=None,
                               market_protection=None):
         """Place an order with automatic slicing for quantities exceeding freeze limits.
@@ -393,6 +396,7 @@ class KiteConnect(object):
         requested quantity exceeds exchange freeze limits.
 
         - `market_protection` accepts `-1` for automatic market protection applied by the system as per market protection guidelines, or a value greater than `0` up to `100` representing a percentage.
+        - `algo_id` is an optional algo ID to associate with the order.
         - Returns the full response dict containing the parent `order_id` and a `children` list,
           where each child is either a placed order (`order_id`) or an `error` payload.
         """

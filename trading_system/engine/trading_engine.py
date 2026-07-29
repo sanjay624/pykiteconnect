@@ -398,7 +398,7 @@ class TradingEngine:
             square_off_time = TradingConfig.POSITION_CONFIG.get("square_off_time")
             should_square_off = False
 
-            if current_time and square_off_time and hasattr(current_time, "time"):
+            if isinstance(current_time, datetime) and square_off_time:
                 should_square_off = current_time.time() >= square_off_time
             elif isinstance(time_to_close, timedelta):
                 should_square_off = time_to_close.total_seconds() <= 300

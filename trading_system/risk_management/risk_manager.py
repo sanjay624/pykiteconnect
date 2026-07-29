@@ -78,7 +78,7 @@ class RiskManager:
                     return 0
             
             # Ensure minimum quantity
-            quantity = max(0, quantity)
+            quantity = max(1, quantity)
             
             self.logger.info(
                 f"Position size calculated: {quantity} units | "

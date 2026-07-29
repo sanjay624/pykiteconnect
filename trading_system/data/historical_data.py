@@ -92,6 +92,40 @@ class HistoricalDataFetcher:
             self.logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
             return None
 
+    def fetch_historical_data_by_token(
+        self,
+        instrument_token,
+        from_date,
+        to_date,
+        interval="5minute",
+    ):
+        """
+        Fetch historical OHLC data directly by instrument token.
+
+        Args:
+            instrument_token: int - Kite instrument token
+            from_date: datetime - Start date
+            to_date: datetime - End date
+            interval: str - Candle interval
+
+        Returns:
+            list - OHLC data [{timestamp, open, high, low, close, volume}, ...]
+        """
+        try:
+            if not instrument_token:
+                return None
+
+            data = self.kite.historical_data(
+                instrument_token=instrument_token,
+                from_date=from_date,
+                to_date=to_date,
+                interval=interval,
+            )
+            return data
+        except Exception as e:
+            self.logger.error(f"Error fetching historical data for token {instrument_token}: {str(e)}")
+            return None
+
     def fetch_multiple_symbols(
         self,
         exchange,
@@ -171,6 +205,43 @@ class HistoricalDataFetcher:
         
         data = self.fetch_historical_data(exchange, symbol, from_date, to_date, interval)
         
+        if data and len(data) > n:
+            return data[-n:]
+        return data
+
+    def get_last_n_candles_by_token(self, instrument_token, n=50, interval="5minute"):
+        """
+        Get last N candles for an instrument token.
+
+        Args:
+            instrument_token: int - Instrument token
+            n: int - Number of candles
+            interval: str - Candle interval
+
+        Returns:
+            list - Last N candles
+        """
+        if interval == "1minute":
+            days_back = n // 375 + 1
+        elif interval == "5minute":
+            days_back = n // 75 + 1
+        elif interval == "15minute":
+            days_back = n // 25 + 1
+        elif interval == "60minute":
+            days_back = n // 6 + 1
+        else:
+            days_back = n + 1
+
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=days_back)
+
+        data = self.fetch_historical_data_by_token(
+            instrument_token=instrument_token,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval,
+        )
+
         if data and len(data) > n:
             return data[-n:]
         return data

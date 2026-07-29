@@ -75,6 +75,9 @@ trading_system/
    ```bash
    export KITE_API_KEY="your_api_key"
    export KITE_API_SECRET="your_api_secret"
+   # Optional: enable live order placement (double opt-in required)
+   export LIVE_TRADING="true"
+   export ALLOW_LIVE_ORDERS="true"
    ```
 
 4. **Run the system**
@@ -268,8 +271,12 @@ RISK_CONFIG = {
 
 ## ⚠️ Important Notes
 
-### Paper Trading
-This system connects to live Kite APIs. **Always test with small quantities first!**
+### Paper vs Live Execution Safety
+- Default mode is **PAPER** (safe): orders are simulated and no live order is sent.
+- Live orders are enabled only when both flags are set:
+  - `LIVE_TRADING=true`
+  - `ALLOW_LIVE_ORDERS=true`
+- If either flag is missing/false, live order placement stays blocked.
 
 ### Market Hours
 System is aware of NSE (9:15 AM - 3:30 PM) and MCX (9:00 AM - 11:30 PM) hours. Trading signals are generated only during market hours.
@@ -280,14 +287,7 @@ Access tokens expire daily. The system handles auto-refresh via refresh_token. I
 2. Run the system again and complete the login flow
 
 ### Historical Data
-Currently, the system uses dummy historical data for testing. To use real data:
-
-```python
-def _fetch_symbol_historical_data(self, symbol):
-    # Replace with real API call
-    instrument = self.kite.instruments(exchange=exchange)
-    # Fetch OHLC via kite.historical_data()
-```
+The engine fetches real historical candles from Kite before generating signals. If historical fetch fails for a symbol, that symbol is skipped (no dummy candle fallback for trading decisions).
 
 ## 🐛 Troubleshooting
 

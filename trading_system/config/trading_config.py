@@ -5,6 +5,7 @@ Market hours, instruments, risk parameters, and strategy settings
 """
 
 import pytz
+import os
 from datetime import time
 from enum import Enum
 
@@ -99,6 +100,13 @@ class TradingConfig:
         "websocket_reconnect_delay": 5,  # seconds
     }
 
+    # ===== EXECUTION SAFETY =====
+    EXECUTION_CONFIG = {
+        "paper_trading_default": True,
+        "live_trading_env": "LIVE_TRADING",
+        "allow_live_orders_env": "ALLOW_LIVE_ORDERS",
+    }
+
     # ===== LOGGING & ALERTS =====
     LOGGING_CONFIG = {
         "log_level": "INFO",  # DEBUG, INFO, WARNING, ERROR
@@ -124,3 +132,20 @@ class TradingConfig:
         """Switch between NSE and MCX"""
         cls.MARKET = market
         print(f"Switched to {market.value.upper()} market")
+
+    @classmethod
+    def get_execution_config(cls):
+        """Resolve execution configuration from defaults + environment flags."""
+        live_flag = os.getenv(cls.EXECUTION_CONFIG["live_trading_env"], "false").strip().lower() == "true"
+        allow_live_orders_flag = (
+            os.getenv(cls.EXECUTION_CONFIG["allow_live_orders_env"], "false").strip().lower() == "true"
+        )
+
+        return {
+            "live_trading_requested": live_flag,
+            "allow_live_orders": allow_live_orders_flag,
+            "live_orders_enabled": live_flag and allow_live_orders_flag,
+            "paper_trading": not (live_flag and allow_live_orders_flag),
+            "live_trading_env": cls.EXECUTION_CONFIG["live_trading_env"],
+            "allow_live_orders_env": cls.EXECUTION_CONFIG["allow_live_orders_env"],
+        }

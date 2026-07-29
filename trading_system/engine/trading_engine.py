@@ -24,6 +24,7 @@ class TradingEngine:
     Main trading engine that orchestrates all components.
     Manages authentication, market data, signals, orders, and positions.
     """
+    LOOKBACK_BUFFER_CANDLES = 5
 
     def __init__(self, api_key, api_secret):
         """
@@ -469,10 +470,16 @@ class TradingEngine:
         """
         Fetch historical data for all symbols.
         """
+        required_candles = self._get_required_lookback_candles()
+        interval = self._get_historical_interval()
         for symbol in self.symbols_to_trade:
-            self._fetch_symbol_historical_data(symbol)
+            self._fetch_symbol_historical_data(
+                symbol,
+                required_candles=required_candles,
+                interval=interval,
+            )
 
-    def _fetch_symbol_historical_data(self, symbol):
+    def _fetch_symbol_historical_data(self, symbol, required_candles=None, interval=None):
         """
         Fetch historical data for a symbol.
         
@@ -491,8 +498,8 @@ class TradingEngine:
                 self.skipped_symbols.add(symbol)
                 return
 
-            required_candles = self._get_required_lookback_candles()
-            interval = self._get_historical_interval()
+            required_candles = required_candles or self._get_required_lookback_candles()
+            interval = interval or self._get_historical_interval()
             historical_data = self.historical_data_fetcher.get_last_n_candles_by_token(
                 instrument_token=instrument_token,
                 n=required_candles,
@@ -655,7 +662,7 @@ class TradingEngine:
             strategy_config.get("sma_long_period", 21),
             strategy_config.get("atr_period", 14),
         ]
-        required = max([configured_lookback] + indicator_periods) + 5
+        required = max([configured_lookback] + indicator_periods) + self.LOOKBACK_BUFFER_CANDLES
         return max(50, int(required))
 
     def _get_historical_interval(self):

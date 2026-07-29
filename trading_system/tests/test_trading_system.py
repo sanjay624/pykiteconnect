@@ -198,22 +198,28 @@ class TestMomentumStrategy:
         """Test signal validation"""
         # Valid signal
         valid_signal = {
+            "symbol": "INFY",
             "direction": "BUY",
             "confidence": 75,
+            "reason": "test",
         }
         assert self.strategy.validate_signal(valid_signal) == True
         
         # Low confidence signal
         low_confidence = {
+            "symbol": "INFY",
             "direction": "BUY",
             "confidence": 30,
+            "reason": "test",
         }
         assert self.strategy.validate_signal(low_confidence) == False
         
         # Hold signal
         hold_signal = {
+            "symbol": "INFY",
             "direction": "HOLD",
             "confidence": 75,
+            "reason": "test",
         }
         assert self.strategy.validate_signal(hold_signal) == False
 

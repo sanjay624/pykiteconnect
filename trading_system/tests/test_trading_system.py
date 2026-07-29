@@ -369,6 +369,23 @@ class TestTradingEngineSafety:
         assert order_data["order_id"] == "123"
         engine.order_manager.place_order.assert_called_once()
 
+    def test_single_live_flag_keeps_paper_mode(self, monkeypatch):
+        monkeypatch.setenv("LIVE_TRADING", "true")
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "false")
+        engine = TradingEngine("api_key", "api_secret")
+        engine.order_manager = Mock()
+
+        order_data = engine._place_order(
+            exchange="NSE",
+            tradingsymbol="INFY",
+            transaction_type="BUY",
+            quantity=1,
+            order_type="MARKET",
+        )
+
+        assert order_data["is_simulated"] is True
+        engine.order_manager.place_order.assert_not_called()
+
     def test_ltp_uses_token_stream_then_quote_fallback(self, monkeypatch):
         monkeypatch.setenv("LIVE_TRADING", "false")
         monkeypatch.setenv("ALLOW_LIVE_ORDERS", "false")

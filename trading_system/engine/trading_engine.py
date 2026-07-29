@@ -6,7 +6,8 @@ Orchestrates the entire trading system - market data, signals, orders, positions
 
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
+import uuid
 from core.authentication import AuthenticationManager
 from core.market_data import MarketDataHandler
 from core.order_manager import OrderManager
@@ -398,7 +399,10 @@ class TradingEngine:
             square_off_time = TradingConfig.POSITION_CONFIG.get("square_off_time")
             should_square_off = False
 
-            if isinstance(current_time, datetime) and square_off_time:
+            if (
+                isinstance(current_time, datetime)
+                and isinstance(square_off_time, dt_time)
+            ):
                 should_square_off = current_time.time() >= square_off_time
             elif isinstance(time_to_close, timedelta):
                 should_square_off = time_to_close.total_seconds() <= 300
@@ -690,7 +694,7 @@ class TradingEngine:
         symbol = order_kwargs.get("tradingsymbol", "UNKNOWN")
         transaction_type = order_kwargs.get("transaction_type", "NA")
         quantity = order_kwargs.get("quantity", 0)
-        simulated_order_id = f"SIM-{int(time.time() * 1000)}"
+        simulated_order_id = f"SIM-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
         self.logger.warning(
             f"[PAPER MODE] Simulated {transaction_type} order for {symbol} x{quantity}; "
             "live order placement blocked"

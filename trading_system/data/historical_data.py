@@ -13,6 +13,12 @@ class HistoricalDataFetcher:
     """
     Fetch historical OHLC data from Kite Connect API.
     """
+    CANDLES_PER_DAY = {
+        "1minute": 375,   # ~6.25 trading hours * 60 minutes
+        "5minute": 75,    # ~375 / 5
+        "15minute": 25,   # ~375 / 15
+        "60minute": 6,    # ~375 / 60
+    }
 
     def __init__(self, kite_instance):
         """
@@ -189,14 +195,8 @@ class HistoricalDataFetcher:
             list - Last N candles
         """
         # Calculate date range based on interval
-        if interval == "1minute":
-            days_back = n // 375 + 1  # ~375 candles per day
-        elif interval == "5minute":
-            days_back = n // 75 + 1  # ~75 candles per day
-        elif interval == "15minute":
-            days_back = n // 25 + 1  # ~25 candles per day
-        elif interval == "60minute":
-            days_back = n // 6 + 1  # ~6 candles per day
+        if interval in self.CANDLES_PER_DAY:
+            days_back = n // self.CANDLES_PER_DAY[interval] + 1
         else:  # daily
             days_back = n + 1
         
@@ -221,14 +221,8 @@ class HistoricalDataFetcher:
         Returns:
             list - Last N candles
         """
-        if interval == "1minute":
-            days_back = n // 375 + 1
-        elif interval == "5minute":
-            days_back = n // 75 + 1
-        elif interval == "15minute":
-            days_back = n // 25 + 1
-        elif interval == "60minute":
-            days_back = n // 6 + 1
+        if interval in self.CANDLES_PER_DAY:
+            days_back = n // self.CANDLES_PER_DAY[interval] + 1
         else:
             days_back = n + 1
 

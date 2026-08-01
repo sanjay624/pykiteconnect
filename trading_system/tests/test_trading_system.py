@@ -19,6 +19,7 @@ from risk_management.risk_manager import RiskManager
 from core.position_tracker import PositionTracker
 from core.order_manager import OrderManager
 from utils.market_hours import MarketHours
+from engine.trading_engine import TradingEngine
 
 
 class TestTradingConfig:
@@ -197,22 +198,28 @@ class TestMomentumStrategy:
         """Test signal validation"""
         # Valid signal
         valid_signal = {
+            "symbol": "INFY",
             "direction": "BUY",
             "confidence": 75,
+            "reason": "test",
         }
         assert self.strategy.validate_signal(valid_signal) == True
         
         # Low confidence signal
         low_confidence = {
+            "symbol": "INFY",
             "direction": "BUY",
             "confidence": 30,
+            "reason": "test",
         }
         assert self.strategy.validate_signal(low_confidence) == False
         
         # Hold signal
         hold_signal = {
+            "symbol": "INFY",
             "direction": "HOLD",
             "confidence": 75,
+            "reason": "test",
         }
         assert self.strategy.validate_signal(hold_signal) == False
 
@@ -287,6 +294,12 @@ class TestRiskManager:
         )
         assert is_valid == False
 
+        # Invalid quantity
+        is_valid, reason = self.risk_manager.validate_order(
+            "INFY", 100, 0, "BUY", 95, 110
+        )
+        assert is_valid == False
+
     def test_daily_loss_tracking(self):
         """Test daily loss tracking"""
         initial_loss = self.risk_manager.daily_loss
@@ -305,6 +318,93 @@ class TestRiskManager:
         self.risk_manager.reset_daily_limits()
         assert self.risk_manager.daily_loss == 0
         assert self.risk_manager.daily_trades == 0
+
+    def test_calculate_position_size_invalid_inputs(self):
+        """Test position sizing rejects invalid values"""
+        quantity = self.risk_manager.calculate_position_size(100000, 0, 95)
+        assert quantity == 0
+
+        quantity = self.risk_manager.calculate_position_size(100000, 100, 0)
+        assert quantity == 0
+
+
+class TestTradingEngineSafety:
+    """
+    Unit tests for execution safety gates and symbol-token LTP mapping.
+    """
+
+    def test_paper_mode_simulates_orders(self, monkeypatch):
+        monkeypatch.setenv("LIVE_TRADING", "false")
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "false")
+        engine = TradingEngine("api_key", "api_secret")
+        engine.order_manager = Mock()
+
+        order_data = engine._place_order(
+            exchange="NSE",
+            tradingsymbol="INFY",
+            transaction_type="BUY",
+            quantity=1,
+            order_type="MARKET",
+        )
+
+        assert order_data["is_simulated"] is True
+        assert order_data["status"] == "SIMULATED"
+        engine.order_manager.place_order.assert_not_called()
+
+    def test_live_mode_places_real_orders(self, monkeypatch):
+        monkeypatch.setenv("LIVE_TRADING", "true")
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "true")
+        engine = TradingEngine("api_key", "api_secret")
+        engine.order_manager = Mock()
+        engine.order_manager.place_order.return_value = {"order_id": "123", "status": "PLACED"}
+
+        order_data = engine._place_order(
+            exchange="NSE",
+            tradingsymbol="INFY",
+            transaction_type="BUY",
+            quantity=1,
+            order_type="MARKET",
+        )
+
+        assert order_data["order_id"] == "123"
+        engine.order_manager.place_order.assert_called_once()
+
+    def test_single_live_flag_keeps_paper_mode(self, monkeypatch):
+        monkeypatch.setenv("LIVE_TRADING", "true")
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "false")
+        engine = TradingEngine("api_key", "api_secret")
+        engine.order_manager = Mock()
+
+        order_data = engine._place_order(
+            exchange="NSE",
+            tradingsymbol="INFY",
+            transaction_type="BUY",
+            quantity=1,
+            order_type="MARKET",
+        )
+
+        assert order_data["is_simulated"] is True
+        engine.order_manager.place_order.assert_not_called()
+
+    def test_ltp_uses_token_stream_then_quote_fallback(self, monkeypatch):
+        monkeypatch.setenv("LIVE_TRADING", "false")
+        monkeypatch.setenv("ALLOW_LIVE_ORDERS", "false")
+        engine = TradingEngine("api_key", "api_secret")
+        engine.symbol_to_instrument_token = {"INFY": 12345}
+        engine.symbol_to_exchange = {"INFY": "NSE"}
+        engine.market_data = Mock()
+        engine.kite = Mock()
+
+        engine.market_data.get_ltp.return_value = 1520.5
+        ltp = engine._get_ltp("INFY")
+        assert ltp == 1520.5
+        engine.kite.quote.assert_not_called()
+
+        engine.market_data.get_ltp.return_value = None
+        engine.kite.quote.return_value = {"NSE:INFY": {"last_price": 1519.0}}
+        ltp = engine._get_ltp("INFY")
+        assert ltp == 1519.0
+        engine.kite.quote.assert_called_with("NSE:INFY")
 
 
 class TestPositionTracker:

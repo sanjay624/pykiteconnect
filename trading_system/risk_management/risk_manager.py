@@ -39,26 +39,43 @@ class RiskManager:
             int - Position quantity
         """
         try:
+            if capital is None or capital <= 0:
+                self.logger.error("Invalid capital for position sizing")
+                return 0
+            if entry_price is None or entry_price <= 0:
+                self.logger.error("Invalid entry price for position sizing")
+                return 0
+            if stop_loss is None or stop_loss <= 0:
+                self.logger.error("Invalid stop loss for position sizing")
+                return 0
+
             risk_method = self.risk_config["position_sizing_method"]
             
             if risk_method == "risk_based":
                 # Risk-based sizing
                 risk_pct = risk_percent or self.risk_config["risk_per_trade"]
+                if risk_pct <= 0:
+                    self.logger.error("Invalid risk percentage for position sizing")
+                    return 0
                 max_loss_amount = (capital * risk_pct) / 100
                 
                 # Calculate quantity
                 price_diff = abs(entry_price - stop_loss)
                 if price_diff == 0:
-                    quantity = 1
+                    self.logger.error("Invalid stop loss distance: zero")
+                    return 0
                 else:
                     quantity = int(max_loss_amount / price_diff)
             else:
                 # Fixed sizing
                 max_position = self.risk_config["max_position_size"]
+                if max_position <= 0:
+                    self.logger.error("Invalid max position size in risk config")
+                    return 0
                 if entry_price > 0:
                     quantity = int(max_position / entry_price)
                 else:
-                    quantity = 1
+                    return 0
             
             # Ensure minimum quantity
             quantity = max(1, quantity)
@@ -85,8 +102,12 @@ class RiskManager:
             tuple - (bool, str) - Can enter and reason
         """
         # Check daily loss limit
-        if self.daily_loss >= self.risk_config["max_daily_loss"]:
-            return False, f"Daily loss limit reached (${self.daily_loss:.2f})"
+        max_daily_loss = self.risk_config["max_daily_loss"]
+        if max_daily_loss <= 0:
+            return False, "Invalid max daily loss configuration"
+        effective_daily_loss = max(0.0, self.daily_loss)
+        if effective_daily_loss >= max_daily_loss:
+            return False, f"Daily loss limit reached (₹{effective_daily_loss:.2f})"
         
         # Check max open positions
         if self.active_positions >= self.risk_config["max_open_positions"]:
@@ -110,12 +131,25 @@ class RiskManager:
             tuple - (bool, str) - Valid and reason
         """
         try:
+            if direction not in ["BUY", "SELL"]:
+                return False, "Direction must be BUY or SELL"
+            if entry_price is None or entry_price <= 0:
+                return False, "Entry price must be greater than zero"
+            if stop_loss is None or stop_loss <= 0:
+                return False, "Stop loss must be greater than zero"
+            if target is None or target <= 0:
+                return False, "Target must be greater than zero"
+            if quantity is None or quantity <= 0:
+                return False, "Quantity must be greater than zero"
+
             # Check stop loss distance
             max_loss = self.risk_config["max_loss_per_trade"]
+            if max_loss <= 0:
+                return False, "Invalid max loss per trade configuration"
             loss_amount = abs(entry_price - stop_loss) * quantity
             
             if loss_amount > max_loss:
-                return False, f"Loss per trade ({loss_amount:.2f}) exceeds max (${max_loss})"
+                return False, f"Loss per trade (₹{loss_amount:.2f}) exceeds max (₹{max_loss})"
             
             # Check stop loss is placed correctly
             if direction == "BUY":
@@ -126,15 +160,14 @@ class RiskManager:
                     return False, "Stop loss must be above entry for SELL"
             
             # Check target is set
-            if not target:
-                return False, "Target must be set"
-            
             # Check risk-reward ratio
             risk = abs(entry_price - stop_loss)
             reward = abs(target - entry_price)
+            if risk <= 0:
+                return False, "Stop loss distance must be greater than zero"
             if reward < risk:
                 self.logger.warning(
-                    f"Risk-reward ratio unfavorable: Risk ${risk:.2f}, Reward ${reward:.2f}"
+                    f"Risk-reward ratio unfavorable: Risk ₹{risk:.2f}, Reward ₹{reward:.2f}"
                 )
             
             return True, "Validated"
@@ -150,10 +183,13 @@ class RiskManager:
         Args:
             loss_amount: float - Loss amount
         """
+        if loss_amount is None or loss_amount < 0:
+            self.logger.warning(f"Ignoring invalid loss amount: {loss_amount}")
+            return
         self.daily_loss += loss_amount
         self.daily_trades += 1
         self.logger.info(
-            f"Loss recorded: ${loss_amount:.2f} | Daily total: ${self.daily_loss:.2f}"
+            f"Loss recorded: ₹{loss_amount:.2f} | Daily total: ₹{self.daily_loss:.2f}"
         )
 
     def record_trade_profit(self, profit_amount):
@@ -163,10 +199,13 @@ class RiskManager:
         Args:
             profit_amount: float - Profit amount
         """
+        if profit_amount is None or profit_amount < 0:
+            self.logger.warning(f"Ignoring invalid profit amount: {profit_amount}")
+            return
         self.daily_loss -= profit_amount  # Reduce cumulative loss
         self.daily_trades += 1
         self.logger.info(
-            f"Profit recorded: ${profit_amount:.2f} | Daily total: ${self.daily_loss:.2f}"
+            f"Profit recorded: ₹{profit_amount:.2f} | Daily total: ₹{self.daily_loss:.2f}"
         )
 
     def increment_active_positions(self):
@@ -198,10 +237,11 @@ class RiskManager:
             dict - Risk metrics
         """
         max_daily_loss = self.risk_config["max_daily_loss"]
-        remaining_loss = max_daily_loss - self.daily_loss
+        effective_daily_loss = max(0.0, self.daily_loss)
+        remaining_loss = max(0.0, max_daily_loss - effective_daily_loss)
         
         return {
-            "daily_loss": self.daily_loss,
+            "daily_loss": effective_daily_loss,
             "max_daily_loss": max_daily_loss,
             "remaining_loss": remaining_loss,
             "daily_trades": self.daily_trades,

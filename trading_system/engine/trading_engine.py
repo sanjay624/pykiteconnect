@@ -6,13 +6,15 @@ Orchestrates the entire trading system - market data, signals, orders, positions
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, time as dt_time
+import uuid
 from core.authentication import AuthenticationManager
 from core.market_data import MarketDataHandler
 from core.order_manager import OrderManager
 from core.position_tracker import PositionTracker
 from strategy.momentum_strategy import MomentumStrategy
 from risk_management.risk_manager import RiskManager
+from data.historical_data import HistoricalDataFetcher
 from utils.logger import TradingLogger
 from utils.market_hours import MarketHours
 from config.trading_config import TradingConfig
@@ -23,6 +25,7 @@ class TradingEngine:
     Main trading engine that orchestrates all components.
     Manages authentication, market data, signals, orders, and positions.
     """
+    LOOKBACK_BUFFER_CANDLES = 5
 
     def __init__(self, api_key, api_secret):
         """
@@ -45,6 +48,7 @@ class TradingEngine:
         self.position_tracker = None
         self.strategy = None
         self.risk_manager = RiskManager()
+        self.historical_data_fetcher = None
         
         # State
         self.is_running = False
@@ -52,6 +56,18 @@ class TradingEngine:
         self.engine_thread = None
         self.symbols_to_trade = []
         self.historical_data_cache = {}  # Cache for historical data
+        self.skipped_symbols = set()
+        self.symbol_to_instrument_token = {}
+        self.instrument_token_to_symbol = {}
+        self.symbol_to_exchange = {}
+        self.execution_config = TradingConfig.get_execution_config()
+        self.live_orders_enabled = self.execution_config["live_orders_enabled"]
+        self.execution_mode = "LIVE" if self.live_orders_enabled else "PAPER"
+        self.logger.warning(
+            f"Execution mode: {self.execution_mode} | "
+            f"{self.execution_config['live_trading_env']}={self.execution_config['live_trading_requested']} | "
+            f"{self.execution_config['allow_live_orders_env']}={self.execution_config['allow_live_orders']}"
+        )
         
         # Callbacks
         self.on_signal = None
@@ -96,6 +112,7 @@ class TradingEngine:
             self.order_manager = OrderManager(self.kite)
             self.position_tracker = PositionTracker(self.kite)
             self.strategy = MomentumStrategy(TradingConfig.STRATEGY_CONFIG["momentum"])
+            self.historical_data_fetcher = HistoricalDataFetcher(self.kite)
             
             # Fetch user profile to verify authentication
             profile = self.kite.profile()
@@ -138,10 +155,25 @@ class TradingEngine:
             self.logger.warning(f"Market is not open. Next close: {market_status['market_close']}")
         
         try:
+            self._initialize_symbol_token_mapping()
+            self.execution_config = TradingConfig.get_execution_config()
+            self.live_orders_enabled = self.execution_config["live_orders_enabled"]
+            self.execution_mode = "LIVE" if self.live_orders_enabled else "PAPER"
+            self.logger.warning(f"Trading start mode: {self.execution_mode}")
+
             # Connect to market data
             self.logger.info("Connecting to market data...")
             self.market_data.connect(threaded=True)
             time.sleep(1)
+
+            # Subscribe to instrument tokens
+            instrument_tokens = list(self.symbol_to_instrument_token.values())
+            if instrument_tokens:
+                self.market_data.subscribe(instrument_tokens)
+                self.market_data.set_mode(self.market_data.ticker.MODE_FULL, instrument_tokens)
+            else:
+                self.logger.error("No valid instrument tokens resolved; cannot start trading.")
+                return False
             
             # Fetch initial historical data
             self.logger.info("Fetching historical data...")
@@ -206,19 +238,7 @@ class TradingEngine:
             symbol: str - Trading symbol
         """
         # Get current price
-        exchange = "NSE" if TradingConfig.MARKET.value == "nse" else "MCX"
-        
-        # Try to get from market data
-        current_price = self.market_data.get_ltp(symbol) if self.market_data else None
-        
-        if not current_price:
-            # Fetch quote from API
-            try:
-                quote = self.kite.quote(f"{exchange}:{symbol}")
-                if quote and exchange in quote:
-                    current_price = quote[exchange][symbol].get("last_price")
-            except:
-                pass
+        current_price = self._get_ltp(symbol)
         
         if not current_price:
             return
@@ -299,10 +319,10 @@ class TradingEngine:
                 return
             
             # Place entry order
-            exchange = "NSE" if TradingConfig.MARKET.value == "nse" else "MCX"
+            exchange = self.symbol_to_exchange.get(symbol, "NSE" if TradingConfig.MARKET.value == "nse" else "MCX")
             transaction_type = "BUY" if direction == "BUY" else "SELL"
             
-            order_data = self.order_manager.place_order(
+            order_data = self._place_order(
                 exchange=exchange,
                 tradingsymbol=symbol,
                 transaction_type=transaction_type,
@@ -373,8 +393,22 @@ class TradingEngine:
         
         # Check market close time
         market_status = MarketHours.get_market_status()
-        if market_status["time_to_close"] and market_status["time_to_close"].total_seconds() < 300:
-            exit_reason = "MARKET_CLOSE"
+        if TradingConfig.POSITION_CONFIG.get("auto_square_off"):
+            time_to_close = market_status.get("time_to_close")
+            current_time = market_status.get("current_time")
+            square_off_time = TradingConfig.POSITION_CONFIG.get("square_off_time")
+            should_square_off = False
+
+            if (
+                isinstance(current_time, datetime)
+                and isinstance(square_off_time, dt_time)
+            ):
+                should_square_off = current_time.time() >= square_off_time
+            elif isinstance(time_to_close, timedelta):
+                should_square_off = time_to_close.total_seconds() <= 300
+
+            if should_square_off:
+                exit_reason = "MARKET_CLOSE"
         
         if exit_reason:
             self._exit_position(symbol, current_price, exit_reason)
@@ -395,10 +429,10 @@ class TradingEngine:
                 return
             
             # Close position
-            exchange = "NSE" if TradingConfig.MARKET.value == "nse" else "MCX"
+            exchange = self.symbol_to_exchange.get(symbol, "NSE" if TradingConfig.MARKET.value == "nse" else "MCX")
             transaction_type = "SELL" if position["side"] == "BUY" else "BUY"
             
-            order_data = self.order_manager.place_order(
+            order_data = self._place_order(
                 exchange=exchange,
                 tradingsymbol=symbol,
                 transaction_type=transaction_type,
@@ -440,10 +474,16 @@ class TradingEngine:
         """
         Fetch historical data for all symbols.
         """
+        required_candles = self._get_required_lookback_candles()
+        interval = self._get_historical_interval()
         for symbol in self.symbols_to_trade:
-            self._fetch_symbol_historical_data(symbol)
+            self._fetch_symbol_historical_data(
+                symbol,
+                required_candles=required_candles,
+                interval=interval,
+            )
 
-    def _fetch_symbol_historical_data(self, symbol):
+    def _fetch_symbol_historical_data(self, symbol, required_candles=None, interval=None):
         """
         Fetch historical data for a symbol.
         
@@ -451,40 +491,41 @@ class TradingEngine:
             symbol: str - Trading symbol
         """
         try:
-            # TODO: Fetch real historical data via Kite API
-            # For now, use dummy data
-            self.historical_data_cache[symbol] = self._generate_dummy_historical_data()
+            if not self.historical_data_fetcher:
+                self.logger.error(f"Historical data fetcher not initialized for {symbol}")
+                self.skipped_symbols.add(symbol)
+                return
+
+            instrument_token = self.symbol_to_instrument_token.get(symbol)
+            if not instrument_token:
+                self.logger.error(f"No instrument token mapping found for {symbol}; skipping symbol")
+                self.skipped_symbols.add(symbol)
+                return
+
+            required_candles = required_candles or self._get_required_lookback_candles()
+            interval = interval or self._get_historical_interval()
+            historical_data = self.historical_data_fetcher.get_last_n_candles_by_token(
+                instrument_token=instrument_token,
+                n=required_candles,
+                interval=interval,
+            )
+
+            if not historical_data or len(historical_data) < required_candles:
+                self.logger.error(
+                    f"Insufficient historical data for {symbol} "
+                    f"({0 if not historical_data else len(historical_data)}/{required_candles}); skipping symbol"
+                )
+                self.historical_data_cache.pop(symbol, None)
+                self.skipped_symbols.add(symbol)
+                return
+
+            self.historical_data_cache[symbol] = historical_data
+            self.skipped_symbols.discard(symbol)
+            self.logger.info(f"Loaded historical candles for {symbol}: {len(historical_data)}")
         except Exception as e:
             self.logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
-
-    def _generate_dummy_historical_data(self, num_candles=50):
-        """
-        Generate dummy historical data for testing.
-        
-        Returns:
-            list - OHLC data
-        """
-        import random
-        data = []
-        price = 100
-        for i in range(num_candles):
-            change = random.uniform(-2, 2)
-            open_price = price
-            close_price = price + change
-            high_price = max(open_price, close_price) + random.uniform(0, 1)
-            low_price = min(open_price, close_price) - random.uniform(0, 1)
-            
-            data.append({
-                "open": open_price,
-                "high": high_price,
-                "low": low_price,
-                "close": close_price,
-                "volume": random.randint(10000, 100000),
-            })
-            
-            price = close_price
-        
-        return data
+            self.historical_data_cache.pop(symbol, None)
+            self.skipped_symbols.add(symbol)
 
     def stop(self):
         """
@@ -501,7 +542,7 @@ class TradingEngine:
             # Close all positions
             for symbol in list(self.position_tracker.get_all_positions().keys()):
                 try:
-                    current_price = self.market_data.get_ltp(symbol) if self.market_data else 100
+                    current_price = self._get_ltp(symbol) or 100
                     self._exit_position(symbol, current_price, "MANUAL_STOP")
                 except:
                     pass
@@ -531,8 +572,145 @@ class TradingEngine:
         return {
             "is_running": self.is_running,
             "is_trading": self.is_trading,
+            "execution_mode": self.execution_mode,
+            "live_orders_enabled": self.live_orders_enabled,
             "market_status": market_status,
             "positions": position_summary,
             "risk": risk_summary,
             "signals": self.strategy.signals if self.strategy else {},
+        }
+
+    def _initialize_symbol_token_mapping(self):
+        """
+        Build canonical symbol <-> instrument token mappings.
+        """
+        configured_instruments = TradingConfig.get_instruments()
+        configured_by_symbol = {item["symbol"]: item for item in configured_instruments}
+        symbols = list(self.symbols_to_trade)
+
+        self.symbol_to_exchange = {}
+        for symbol in symbols:
+            instrument_cfg = configured_by_symbol.get(symbol, {})
+            self.symbol_to_exchange[symbol] = instrument_cfg.get(
+                "exchange",
+                "NSE" if TradingConfig.MARKET.value == "nse" else "MCX",
+            )
+
+        self.symbol_to_instrument_token = {}
+        self.instrument_token_to_symbol = {}
+
+        exchanges = sorted(set(self.symbol_to_exchange.values()))
+        for exchange in exchanges:
+            try:
+                instruments = self.kite.instruments(exchange=exchange)
+            except Exception as e:
+                self.logger.error(f"Failed loading instruments for {exchange}: {str(e)}")
+                continue
+
+            token_by_symbol = {
+                instrument.get("tradingsymbol"): instrument.get("instrument_token")
+                for instrument in instruments
+            }
+
+            for symbol, symbol_exchange in self.symbol_to_exchange.items():
+                if symbol_exchange != exchange:
+                    continue
+                token = token_by_symbol.get(symbol)
+                if token:
+                    self.symbol_to_instrument_token[symbol] = token
+                    self.instrument_token_to_symbol[token] = symbol
+                else:
+                    self.logger.error(f"Instrument token not found for {exchange}:{symbol}")
+
+        missing_symbols = [s for s in symbols if s not in self.symbol_to_instrument_token]
+        if missing_symbols:
+            self.logger.error(
+                f"Skipping symbols with missing instrument token mapping: {', '.join(missing_symbols)}"
+            )
+            self.symbols_to_trade = [s for s in symbols if s in self.symbol_to_instrument_token]
+        self.logger.info(
+            f"Resolved instrument mappings for {len(self.symbols_to_trade)} symbols"
+        )
+
+    def _get_ltp(self, symbol):
+        """
+        Get LTP for a symbol from stream first, then quote fallback.
+        """
+        instrument_token = self.symbol_to_instrument_token.get(symbol)
+        exchange = self.symbol_to_exchange.get(symbol, "NSE" if TradingConfig.MARKET.value == "nse" else "MCX")
+
+        if instrument_token and self.market_data:
+            streamed_ltp = self.market_data.get_ltp(instrument_token)
+            if streamed_ltp is not None:
+                return streamed_ltp
+
+        quote_key = f"{exchange}:{symbol}"
+        try:
+            quote = self.kite.quote(quote_key)
+            if quote and quote_key in quote:
+                return quote[quote_key].get("last_price")
+        except Exception as e:
+            self.logger.warning(f"Quote fallback failed for {quote_key}: {str(e)}")
+
+        return None
+
+    def _get_required_lookback_candles(self):
+        """
+        Determine minimum lookback candles needed for configured indicators.
+        """
+        strategy_config = TradingConfig.STRATEGY_CONFIG.get("momentum", {})
+        configured_lookback = strategy_config.get("lookback_candles", 50)
+        indicator_periods = [
+            strategy_config.get("rsi_period", 14),
+            strategy_config.get("sma_short_period", 9),
+            strategy_config.get("sma_long_period", 21),
+            strategy_config.get("atr_period", 14),
+        ]
+        required = max([configured_lookback] + indicator_periods) + self.LOOKBACK_BUFFER_CANDLES
+        return max(50, int(required))
+
+    def _get_historical_interval(self):
+        """
+        Map strategy timeframe to Kite historical interval.
+        """
+        timeframe = TradingConfig.STRATEGY_CONFIG.get("momentum", {}).get("timeframe", "5min")
+        timeframe_map = {
+            "1min": "1minute",
+            "5min": "5minute",
+            "15min": "15minute",
+            "30min": "30minute",
+            "60min": "60minute",
+            "daily": "day",
+        }
+        return timeframe_map.get(timeframe, "5minute")
+
+    def _place_order(self, **order_kwargs):
+        """
+        Place live order only when explicitly enabled, else simulate.
+        """
+        if self.live_orders_enabled:
+            return self.order_manager.place_order(**order_kwargs)
+
+        symbol = order_kwargs.get("tradingsymbol", "UNKNOWN")
+        transaction_type = order_kwargs.get("transaction_type", "NA")
+        quantity = order_kwargs.get("quantity", 0)
+        simulated_order_id = f"SIM-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+        self.logger.warning(
+            f"[PAPER MODE] Simulated {transaction_type} order for {symbol} x{quantity}; "
+            "live order placement blocked"
+        )
+        return {
+            "order_id": simulated_order_id,
+            "symbol": symbol,
+            "exchange": order_kwargs.get("exchange"),
+            "type": transaction_type,
+            "quantity": quantity,
+            "product": order_kwargs.get("product"),
+            "order_type": order_kwargs.get("order_type"),
+            "price": order_kwargs.get("price"),
+            "trigger_price": order_kwargs.get("trigger_price"),
+            "status": "SIMULATED",
+            "placed_at": datetime.now(),
+            "tag": order_kwargs.get("tag"),
+            "is_simulated": True,
         }
